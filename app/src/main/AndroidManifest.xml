@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.smartassist">
+
+    <!-- ================================================= -->
+    <!-- 🔐 Required Permissions -->
+    <!-- ================================================= -->
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"
+        android:required="false" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- ================================================= -->
+    <!-- 🧠 Application -->
+    <!-- ================================================= -->
+
+    <application
+        android:name=".SmartAssistApp"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="true"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="false"
+        android:theme="@style/Theme.SmartAssist">
+
+        <!-- 🔹 Launcher Activity -->
+        <activity
+            android:name=".MainLauncherActivity"
+            android:exported="true"
+            android:theme="@style/Theme.SmartAssist">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+        </activity>
+
+        <!-- 🔹 Onboarding Activity (ADD THIS) -->
+        <activity
+            android:name=".onboarding.OnboardingActivity"
+            android:exported="false"
+            android:theme="@style/Theme.SmartAssist" />
+
+        <!-- 🔹 Settings -->
+        <activity
+            android:name=".settings.SettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.SmartAssist" />
+
+        <!-- 🔹 Screen Capture Permission Activity -->
+        <activity
+            android:name=".settings.ScreenCapturePermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:finishOnTaskLaunch="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.SmartAssist.Transparent" />
+
+        <!-- 🔹 Floating Overlay Service -->
+        <service
+            android:name=".overlay.FloatingService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+    </application>
+
+</manifest>
