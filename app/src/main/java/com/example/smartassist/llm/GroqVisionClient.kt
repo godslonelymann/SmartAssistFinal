@@ -84,30 +84,51 @@ class GroqVisionClient(
     ): JSONObject {
 
         val prompt = """
-You are an accessibility screen understanding assistant.
+You are an advanced accessibility screen understanding assistant.
 
-Analyze the screenshot and OCR text carefully.
+Analyze the screenshot image AND the OCR text carefully.
 
-Your task:
+Your goal is to understand what this screen represents in real-world context.
 
-1. Identify what type of screen this is (settings, login, home, product, form, etc.).
-2. Explain clearly what this screen is for in simple language.
+Instructions:
+
+1. Identify what this screen most likely represents.
+   - Examples: login page, shopping app, poem page, YouTube video, news article, government website, banking app, product listing, settings page, social media profile, etc.
+   - If the content matches a known poem, story, or famous text, identify it clearly.
+   - If a website URL or brand name is visible, identify the website/service and briefly explain what it is.
+
+2. Provide a clear explanation in simple language:
+   - What this screen is.
+   - What the user is looking at.
+   - What the purpose of this screen is.
+   - Keep it helpful and accessible.
+   - Maximum 7 sentences.
+
 3. List ALL visible actions the user can take.
-   - Include buttons, menu options, toggles, links, inputs.
+   - Include buttons, toggles, links, input fields, menu options.
    - Use short action phrases.
-4. If there is any image:
-   - Identify what it represents.
-   - Classify it as person, animal, object, product, place, logo, or illustration.
-   - Describe it in ONE short sentence.
-5. Do NOT repeat OCR text word-by-word.
-6. Do NOT describe layout positions.
-7. Keep explanation short and useful (max 4 sentences in summary).
+   - Do NOT hallucinate actions that are not visible.
 
-Return STRICT JSON:
+4. If there is an image:
+   - Identify what it represents.
+   - Classify it (person, object, logo, product, place, illustration, etc.)
+   - Describe it in ONE short sentence.
+
+5. If a URL is visible:
+   - Identify the website or service.
+   - Explain briefly what that website is known for.
+   - Only state known information. Do NOT guess unknown facts.
+
+6. IMPORTANT:
+   - Do NOT repeat OCR text word-by-word.
+   - Do NOT describe layout positions.
+   - Do NOT invent details not visible or reasonably inferable.
+   - If unsure, say "Not clearly identifiable".
+
+Return STRICT JSON only:
 
 {
-  "screenType": "ONE_WORD_TYPE",
-  "summary": "Clear explanation of what this screen is and what the user can do.",
+  "summary": "Clear explanation of what this screen represents and its purpose.",
   "actions": [
     "Action 1",
     "Action 2"

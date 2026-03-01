@@ -20,14 +20,15 @@ import com.example.smartassist.capture.ScreenCaptureManager
 import com.example.smartassist.llm.GroqVisionClient
 import com.example.smartassist.narration.ScreenNarrationBuilder
 import com.example.smartassist.ocr.OcrEngine
-import com.example.smartassist.output.SarvamTtsClient
 import com.example.smartassist.settings.ScreenCapturePermissionActivity
 import com.example.smartassist.settings.UserPreferences
 import com.example.smartassist.translation.OfflineTranslator
 import com.example.smartassist.understanding.HybridMerger
+import com.example.smartassist.output.TtsPlayer
+import java.util.Locale
 import kotlinx.coroutines.*
 import kotlin.math.abs
-import java.io.File
+
 import android.content.ContentValues
 import com.example.smartassist.R
 
@@ -62,6 +63,8 @@ class FloatingService : Service() {
     private val panelWidth by lazy { dp(300) }
     private val panelMaxHeight by lazy { dp(320) }
 
+    private lateinit var ttsPlayer: TtsPlayer
+
     private var lastResultText = ""
 
     private val translator by lazy { OfflineTranslator() }
@@ -70,11 +73,9 @@ class FloatingService : Service() {
         GroqVisionClient(BuildConfig.GROQ_API_KEY)
     }
 
-    private val sarvamTtsClient by lazy {
-        SarvamTtsClient(BuildConfig.SARVAM_API_KEY)
-    }
 
-    private var mediaPlayer: MediaPlayer? = null
+
+
 
     private val serviceScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -114,6 +115,11 @@ class FloatingService : Service() {
         createBubble()
         createPanel()
 
+        ttsPlayer = TtsPlayer(this)
+
+        // Optional: default tuning
+        ttsPlayer.setSpeechRate(1.00f)
+        ttsPlayer.setPitch(0.85f)
 
 
         bubbleParams = WindowManager.LayoutParams(
@@ -133,9 +139,8 @@ class FloatingService : Service() {
     override fun onDestroy() {
 
 
-        mediaPlayer?.release()
-        mediaPlayer = null
 
+        ttsPlayer.shutdown()
         removeAllOverlays()
         translator.close()
         serviceScope.cancel()
@@ -346,56 +351,6 @@ class FloatingService : Service() {
         return START_NOT_STICKY
     }
 
-    // =========================================================
-    // Sarvam TTS
-    // =========================================================
-
-    private fun speakWithSarvam(text: String) {
-
-        if (text.isBlank()) return
-
-        serviceScope.launch {
-
-            disableReadAloudButton()
-
-            val language =
-                UserPreferences.getSelectedLanguage(applicationContext)
-
-            val audioBytes =
-                sarvamTtsClient.synthesize(text, language)
-
-            if (audioBytes != null) {
-
-                val tempFile = File.createTempFile(
-                    "sarvam_tts",
-                    ".mp3",
-                    cacheDir
-                )
-
-                tempFile.writeBytes(audioBytes)
-
-                mediaPlayer?.release()
-                mediaPlayer = MediaPlayer().apply {
-                    setDataSource(tempFile.absolutePath)
-                    prepare()
-                    start()
-
-                    setOnCompletionListener {
-                        release()
-                        tempFile.delete()
-                        mediaPlayer = null
-                        enableReadAloudButton()
-                    }
-                }
-            } else {
-                enableReadAloudButton()
-            }
-        }
-    }
-
-    // =========================================================
-    // Language Refresh
-    // =========================================================
 
 
 
@@ -524,7 +479,17 @@ class FloatingService : Service() {
             isEnabled = false
             alpha = 0.4f
             setOnClickListener {
-                speakWithSarvam(lastResultText)
+
+                val language =
+                    UserPreferences.getSelectedLanguage(applicationContext)
+
+                val locale = when (language) {
+                    "hi" -> Locale("hi")
+                    "mr" -> Locale("mr")
+                    else -> Locale.ENGLISH
+                }
+
+                ttsPlayer.speak(lastResultText, locale)
             }
         }
 
@@ -534,8 +499,7 @@ class FloatingService : Service() {
             text = Labels.t(language, "stop")
             setPadding(dp(12), dp(8), dp(12), dp(8))
             setOnClickListener {
-                mediaPlayer?.release()
-                mediaPlayer = null
+                ttsPlayer.stop()
                 stopSelf()
             }
         }

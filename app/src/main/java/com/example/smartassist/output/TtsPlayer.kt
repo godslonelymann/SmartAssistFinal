@@ -19,6 +19,10 @@ class TtsPlayer(
     private var tts: TextToSpeech? = null
     private var isReady = false
 
+    // 🎛 Adjustable values
+    private var speechRate: Float = 0.92f   // default more natural
+    private var pitch: Float = 1.05f        // slight warmth
+
     init {
         initialize()
     }
@@ -52,7 +56,24 @@ class TtsPlayer(
     }
 
     // =========================================================
-    // PUBLIC SPEAK FUNCTION
+    // 🎛 PUBLIC CONFIGURATION METHODS
+    // =========================================================
+
+    fun setSpeechRate(rate: Float) {
+        speechRate = rate.coerceIn(0.5f, 1.5f)
+        tts?.setSpeechRate(speechRate)
+    }
+
+    fun setPitch(newPitch: Float) {
+        pitch = newPitch.coerceIn(0.5f, 2.0f)
+        tts?.setPitch(pitch)
+    }
+
+    fun getSpeechRate(): Float = speechRate
+    fun getPitch(): Float = pitch
+
+    // =========================================================
+    // 🔊 SPEAK
     // =========================================================
 
     fun speak(text: String, locale: Locale) {
@@ -67,14 +88,13 @@ class TtsPlayer(
         if (result == TextToSpeech.LANG_MISSING_DATA ||
             result == TextToSpeech.LANG_NOT_SUPPORTED
         ) {
-            Log.w(TAG, "Language missing or not supported: $locale")
             requestLanguageInstall()
             return
         }
 
-        // Improve voice quality (slightly slower, more natural)
-        tts?.setSpeechRate(0.95f)
-        tts?.setPitch(1.0f)
+        // Apply current tuning values
+        tts?.setSpeechRate(speechRate)
+        tts?.setPitch(pitch)
 
         val utteranceId = UUID.randomUUID().toString()
 
@@ -87,7 +107,7 @@ class TtsPlayer(
     }
 
     // =========================================================
-    // AUTO LANGUAGE INSTALL TRIGGER
+    // INSTALL LANGUAGE
     // =========================================================
 
     private fun requestLanguageInstall() {
@@ -96,30 +116,21 @@ class TtsPlayer(
             installIntent.action = TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA
             installIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             context.startActivity(installIntent)
-
-            Log.d(TAG, "Opened TTS language install screen")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to open TTS install screen", e)
-        }
+        } catch (_: Exception) {}
     }
 
     // =========================================================
-    // STOP
+    // STOP & CLEANUP
     // =========================================================
 
     fun stop() {
         tts?.stop()
     }
 
-    // =========================================================
-    // CLEANUP
-    // =========================================================
-
     fun shutdown() {
         tts?.stop()
         tts?.shutdown()
         tts = null
         isReady = false
-        Log.d(TAG, "TTS shutdown complete")
     }
 }
