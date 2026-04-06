@@ -318,14 +318,8 @@ class FloatingService : Service() {
                             this@FloatingService,
                             translatedResult
                         )
-                    val finalText =
-                        if (ocrText.isNotBlank()) {
-                            finalFormatted +
-                                    "\n\nText Detected:\n" +
-                                    ocrText
-                        } else {
-                            finalFormatted
-                        }
+                    val finalText = finalFormatted
+
 
 
 
@@ -500,7 +494,6 @@ class FloatingService : Service() {
             setPadding(dp(12), dp(8), dp(12), dp(8))
             setOnClickListener {
                 ttsPlayer.stop()
-                stopSelf()
             }
         }
         addButton(stopButton)
