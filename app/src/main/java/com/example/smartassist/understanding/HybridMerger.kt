@@ -1,62 +1,59 @@
 package com.example.smartassist.understanding
 
-import com.example.smartassist.ocr.TextBlock
 import org.json.JSONObject
 
 object HybridMerger {
 
-    fun merge(
-        ocrBlocks: List<TextBlock>,
-        groqRaw: String?
-    ): ScreenUnderstandingResult {
+    fun merge(groqRaw: String?): ScreenUnderstandingResult {
 
-        val ocrText =
-            ocrBlocks
-                .map { it.text.trim() }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .joinToString("\n")
-
-        // 🔹 If Groq fails → fallback cleanly
         if (groqRaw.isNullOrBlank()) {
             return ScreenUnderstandingResult(
-                summary = if (ocrText.isNotBlank()) {
-                    ocrText
-                } else {
-                    "No visible text detected."
-                },
+                summary = "Unable to understand screen.",
                 actions = emptyList(),
                 imageDescription = null,
-                confidence = 0.5f
+                confidence = 0.3f
             )
         }
 
         return try {
+            val cleaned = groqRaw
+                .replace(Regex("^\\s*```json\\s*", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("^\\s*```\\s*"), "")
+                .replace(Regex("\\s*```\\s*$"), "")
+                .trim()
 
-            val json = JSONObject(groqRaw)
+            val json = JSONObject(cleaned)
 
+            val summary = json.optString("summary", "")
+                .trim()
+                .ifBlank { "No summary available." }
 
-            val summary =
-                json.optString("summary", "")
-                    .trim()
+            val imageDescription = json.optString("imageDescription", "")
+                .trim()
+                .takeIf { it.isNotBlank() }
 
-            val imageDescription =
-                json.optString("imageDescription", "")
-                    .takeIf { it.isNotBlank() }
+            val confidence = when {
+                json.has("confidence") && !json.isNull("confidence") -> {
+                    when (val rawConfidence = json.get("confidence")) {
+                        is Number -> rawConfidence.toFloat()
+                        is String -> rawConfidence.toFloatOrNull() ?: 0.7f
+                        else -> 0.7f
+                    }
+                }
+                else -> 0.7f
+            }.coerceIn(0f, 1f)
 
-            val confidence =
-                json.optDouble("confidence", 0.7)
-                    .toFloat()
-                    .coerceIn(0f, 1f)
-
-            // 🔥 Parse actions array
             val actionsList = mutableListOf<String>()
-
             val actionsArray = json.optJSONArray("actions")
+
             if (actionsArray != null) {
                 for (i in 0 until actionsArray.length()) {
-                    val action =
-                        actionsArray.optString(i).trim()
+                    val action = when (val item = actionsArray.opt(i)) {
+                        is String -> item.trim()
+                        is JSONObject -> item.optString("label", "").trim()
+                        else -> item?.toString()?.trim().orEmpty()
+                    }
+
                     if (action.isNotBlank()) {
                         actionsList.add(action)
                     }
@@ -64,22 +61,25 @@ object HybridMerger {
             }
 
             ScreenUnderstandingResult(
-
                 summary = summary,
-                actions = actionsList,
+                actions = actionsList.distinct(),
                 imageDescription = imageDescription,
                 confidence = confidence
             )
 
         } catch (e: Exception) {
+            val fallbackSummary = groqRaw
+                .replace(Regex("^\\s*```json\\s*", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("^\\s*```\\s*"), "")
+                .replace(Regex("\\s*```\\s*$"), "")
+                .trim()
+                .ifBlank { "Unable to understand screen." }
 
-            // 🔹 JSON parsing failed → fallback safely
             ScreenUnderstandingResult(
-
-                summary = groqRaw.trim(),
+                summary = fallbackSummary,
                 actions = emptyList(),
                 imageDescription = null,
-                confidence = 0.6f
+                confidence = 0.5f
             )
         }
     }
