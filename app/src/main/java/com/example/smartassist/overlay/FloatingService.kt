@@ -4,7 +4,12 @@ import android.app.*
 import android.content.*
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.style.StyleSpan
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaPlayer
 import android.media.projection.MediaProjection
@@ -12,6 +17,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.*
 import android.provider.MediaStore
 import android.provider.Settings
+import android.util.Log
 import android.view.*
 import android.widget.*
 import androidx.annotation.RequiresApi
@@ -19,11 +25,14 @@ import com.example.smartassist.BuildConfig
 import com.example.smartassist.capture.ScreenCaptureManager
 import com.example.smartassist.llm.GroqVisionClient
 import com.example.smartassist.narration.ScreenNarrationBuilder
+import com.example.smartassist.narration.VisibleTextFormatter
 import com.example.smartassist.ocr.OcrEngine
 import com.example.smartassist.settings.ScreenCapturePermissionActivity
 import com.example.smartassist.settings.UserPreferences
 import com.example.smartassist.translation.OfflineTranslator
 import com.example.smartassist.understanding.HybridMerger
+import com.example.smartassist.understanding.ScreenKeyElement
+import com.example.smartassist.understanding.ScreenUnderstandingResult
 import com.example.smartassist.output.TtsPlayer
 import java.util.Locale
 import kotlinx.coroutines.*
@@ -33,6 +42,10 @@ import android.content.ContentValues
 import com.example.smartassist.R
 
 class FloatingService : Service() {
+
+    companion object {
+        private const val TAG = "FloatingService"
+    }
 
 
 
@@ -44,6 +57,7 @@ class FloatingService : Service() {
     private lateinit var panelOverlay: FrameLayout
     private lateinit var panelView: LinearLayout
     private lateinit var panelText: TextView
+    private lateinit var panelContentContainer: LinearLayout
     private lateinit var readAloudButton: Button
 
     private lateinit var captureButton: Button
@@ -182,30 +196,34 @@ class FloatingService : Service() {
             serviceScope.coroutineContext.cancelChildren()
 
             serviceScope.launch {
+                try {
+                    // Remove overlays before capture
+                    withContext(Dispatchers.Main) {
+                        removeAllOverlays()
+                    }
 
-                // Remove overlays before capture
-                withContext(Dispatchers.Main) {
-                    removeAllOverlays()
-                }
+                    // Small delay so previous app fully renders
+                    delay(200)
 
-                // Small delay so previous app fully renders
-                delay(200)
-
-                panelText.text =
-                    Labels.t(
-                        UserPreferences.getSelectedLanguage(applicationContext),
-                        "reading"
+                    showLoadingMessage(
+                        Labels.t(
+                            UserPreferences.getSelectedLanguage(applicationContext),
+                            "reading"
+                        )
                     )
 
-                disableReadAloudButton()
-
-                try {
+                    lastResultText = ""
+                    disableReadAloudButton()
 
                     val captureManager =
                         ScreenCaptureManager(applicationContext, mediaProjection)
 
                     val frames = captureManager.captureFrames()
-                    if (frames.isEmpty()) return@launch
+                    if (frames.isEmpty()) {
+                        Log.w(TAG, "Capture returned no frames")
+                        showPipelineMessage("Unable to capture the screen. Please try again.")
+                        return@launch
+                    }
 
                     val screenshot =
                         frames.drop(1).firstOrNull() ?: frames.first()
@@ -214,6 +232,10 @@ class FloatingService : Service() {
 
                     val ocrBlocks =
                         ocrEngine.recognize(listOf(screenshot))
+
+                    if (ocrBlocks.isEmpty()) {
+                        Log.w(TAG, "OCR returned no text")
+                    }
 
                     val ocrText =
                         ocrBlocks.joinToString("\n") { it.text }
@@ -235,9 +257,14 @@ class FloatingService : Service() {
                                 screenshot,
                                 ocrText
                             )
-                        } catch (_: Exception) {
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Groq analysis failed", e)
                             null
                         }
+
+                    if (groqResponse.isNullOrBlank()) {
+                        Log.w(TAG, "Groq response unavailable; using fallback")
+                    }
 
                     val hybridResult =
                         HybridMerger.merge(
@@ -248,13 +275,19 @@ class FloatingService : Service() {
 
                     val targetLang =
                         UserPreferences.getSelectedLanguage(applicationContext)
+                    var translationFallbackUsed = false
 
                     // 🔥 MODEL DOWNLOAD CHECK HERE
                     if (targetLang != "en" &&
                         !UserPreferences.isModelDownloaded(applicationContext, targetLang)
                     ) {
-                        translator.preloadLanguage(targetLang)
-                        UserPreferences.setModelDownloaded(applicationContext, targetLang)
+                        val preloaded = translator.preloadLanguage(targetLang)
+                        if (preloaded) {
+                            UserPreferences.setModelDownloaded(applicationContext, targetLang)
+                        } else {
+                            translationFallbackUsed = true
+                            Log.w(TAG, "Translation model preload failed for $targetLang")
+                        }
                     }
 
                     // 🔹 Translate ONLY semantic fields, not formatted text
@@ -272,7 +305,9 @@ class FloatingService : Service() {
                                     targetLang
                                 )
 
-                            } catch (_: Exception) {
+                            } catch (e: Exception) {
+                                translationFallbackUsed = true
+                                Log.e(TAG, "Summary translation failed", e)
                                 hybridResult.summary
                             }
                         }
@@ -285,9 +320,83 @@ class FloatingService : Service() {
                                 try {
 
                                     translator.translate(desc, targetLang)
-                                } catch (_: Exception) {
+                                } catch (e: Exception) {
+                                    translationFallbackUsed = true
+                                    Log.e(TAG, "Image description translation failed", e)
                                     desc
                                 }
+                            }
+                        }
+
+                    val translatedAssistantAnswer =
+                        if (targetLang == "en") {
+                            hybridResult.assistantAnswer
+                        } else {
+                            try {
+                                translator.translate(
+                                    hybridResult.assistantAnswer,
+                                    targetLang
+                                )
+                            } catch (e: Exception) {
+                                translationFallbackUsed = true
+                                Log.e(TAG, "Assistant answer translation failed", e)
+                                hybridResult.assistantAnswer
+                            }
+                        }
+
+                    val translatedVisibleTextExplanation =
+                        if (targetLang == "en") {
+                            hybridResult.visibleTextExplanation
+                        } else {
+                            try {
+                                translator.translate(
+                                    hybridResult.visibleTextExplanation,
+                                    targetLang
+                                )
+                            } catch (e: Exception) {
+                                translationFallbackUsed = true
+                                Log.e(TAG, "Visible text explanation translation failed", e)
+                                hybridResult.visibleTextExplanation
+                            }
+                        }
+
+                    val translatedKeyElements =
+                        if (targetLang == "en") {
+                            hybridResult.keyElements
+                        } else {
+                            hybridResult.keyElements.map { item ->
+                                ScreenKeyElement(
+                                    title = try {
+                                        translator.translate(item.title, targetLang)
+                                    } catch (e: Exception) {
+                                        translationFallbackUsed = true
+                                        Log.e(TAG, "Key element title translation failed", e)
+                                        item.title
+                                    },
+                                    description = try {
+                                        translator.translate(item.description, targetLang)
+                                    } catch (e: Exception) {
+                                        translationFallbackUsed = true
+                                        Log.e(TAG, "Key element description translation failed", e)
+                                        item.description
+                                    }
+                                )
+                            }
+                        }
+
+                    val translatedContextInfo =
+                        if (targetLang == "en") {
+                            hybridResult.contextInfo
+                        } else {
+                            try {
+                                translator.translate(
+                                    hybridResult.contextInfo,
+                                    targetLang
+                                )
+                            } catch (e: Exception) {
+                                translationFallbackUsed = true
+                                Log.e(TAG, "Context translation failed", e)
+                                hybridResult.contextInfo
                             }
                         }
 
@@ -300,7 +409,9 @@ class FloatingService : Service() {
                                 try {
 
                                     translator.translate(action, targetLang)
-                                } catch (_: Exception) {
+                                } catch (e: Exception) {
+                                    translationFallbackUsed = true
+                                    Log.e(TAG, "Action translation failed", e)
                                     action
                                 }
                             }
@@ -310,7 +421,13 @@ class FloatingService : Service() {
                         hybridResult.copy(
                             summary = translatedSummary,
                             actions = translatedActions,
-                            imageDescription = translatedImageDescription
+                            imageDescription = translatedImageDescription,
+                            assistantAnswer = translatedAssistantAnswer,
+                            visibleTextLines = hybridResult.visibleTextLines,
+                            visibleTextExplanation = translatedVisibleTextExplanation,
+                            visibleTextGroups = hybridResult.visibleTextGroups,
+                            keyElements = translatedKeyElements,
+                            contextInfo = translatedContextInfo
                         )
 
                     val finalFormatted =
@@ -318,7 +435,17 @@ class FloatingService : Service() {
                             this@FloatingService,
                             translatedResult
                         )
-                    val finalText = finalFormatted
+                    val finalTextBase =
+                        finalFormatted.ifBlank {
+                            "I could not understand the screen right now. Please try again."
+                        }
+
+                    val finalText =
+                        if (translationFallbackUsed && targetLang != "en") {
+                            finalTextBase + "\n\nTranslation was unavailable, so some text may remain in English."
+                        } else {
+                            finalTextBase
+                        }
 
 
 
@@ -327,16 +454,28 @@ class FloatingService : Service() {
 
                         lastResultText = finalText
 
-                        val confidenceHeader =
-                            "OCR Confidence: $ocrConfidencePercent%\n\n"
+                        renderScreenResult(
+                            translatedResult,
+                            ocrConfidencePercent
+                        )
 
-                        panelText.text = confidenceHeader + finalText
-
-                        enableReadAloudButton()
-                        restoreOverlaysAfterCapture()
+                        if (finalText.isNotBlank()) {
+                            enableReadAloudButton()
+                        } else {
+                            disableReadAloudButton()
+                        }
                     }
 
+                } catch (e: CancellationException) {
+                    Log.d(TAG, "Capture pipeline cancelled")
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Capture pipeline failed", e)
+                    showPipelineMessage("Unable to read the screen right now. Please try again.")
                 } finally {
+                    withContext(NonCancellable + Dispatchers.Main) {
+                        restoreOverlaysAfterCapture()
+                    }
                     try { mediaProjection.stop() } catch (_: Exception) {}
                 }
             }
@@ -424,14 +563,20 @@ class FloatingService : Service() {
             setPadding(dp(12), dp(12), dp(12), dp(12))
         }
 
+        panelContentContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
         panelText = TextView(this).apply {
-            text = Labels.t(language, "tap_capture")
             textSize = 14f
+            setTextColor(Color.rgb(38, 40, 44))
             maxWidth = panelWidth - dp(24)
         }
 
         val scroll = ScrollView(this)
-        scroll.addView(panelText)
+        scroll.addView(panelContentContainer)
+
+        showLoadingMessage(Labels.t(language, "tap_capture"))
 
         panelView.addView(
             scroll,
@@ -594,6 +739,269 @@ class FloatingService : Service() {
     private fun disableReadAloudButton() {
         readAloudButton.isEnabled = false
         readAloudButton.alpha = 0.4f
+    }
+
+    private fun showPipelineMessage(message: String) {
+        lastResultText = message
+        showLoadingMessage(message)
+        if (message.isNotBlank()) {
+            enableReadAloudButton()
+        } else {
+            disableReadAloudButton()
+        }
+    }
+
+    private fun clearPanelContent() {
+        panelContentContainer.removeAllViews()
+    }
+
+    private fun showLoadingMessage(message: String) {
+        clearPanelContent()
+        panelText.text = message
+        panelText.setPadding(0, 0, 0, 0)
+        panelContentContainer.addView(panelText)
+    }
+
+    private fun renderScreenResult(
+        result: ScreenUnderstandingResult,
+        ocrConfidencePercent: Int
+    ) {
+        clearPanelContent()
+
+        addCaptionText("OCR Confidence: $ocrConfidencePercent%")
+
+        val assistantAnswer =
+            result.assistantAnswer.ifBlank {
+                result.summary
+            }
+
+        if (assistantAnswer.isNotBlank()) {
+            addSectionTitle("Assistant Answer")
+            addBodyText(assistantAnswer)
+        }
+
+        val visibleTextGroups =
+            result.visibleTextGroups.ifEmpty {
+                VisibleTextFormatter.groupVisibleText(
+                    lines = result.visibleTextLines,
+                    screenType = result.screenType,
+                    title = result.title
+                )
+            }
+
+        val visibleTextContent =
+            VisibleTextFormatter.formatGroupsForDisplay(visibleTextGroups)
+
+        if (visibleTextContent.isNotBlank()) {
+            addSectionTitle("Visible Text")
+            addVisibleTextCard(listOf(visibleTextContent))
+        }
+
+        if (result.keyElements.isNotEmpty()) {
+            addSectionTitle("Key Elements on the Screen")
+            result.keyElements.forEach { item ->
+                addKeyElementCard(item)
+            }
+        }
+
+        if (result.contextInfo.isNotBlank()) {
+            addSectionTitle("Context")
+            addBodyText(result.contextInfo)
+        }
+
+        result.imageDescription
+            ?.takeIf { it.isNotBlank() }
+            ?.let { image ->
+                addSectionTitle("Image Description")
+                addBodyText(image)
+            }
+
+        if (result.actions.isNotEmpty()) {
+            addSectionTitle("Actions")
+            addActionsList(result.actions)
+        }
+    }
+
+    private fun addCaptionText(text: String) {
+        panelContentContainer.addView(
+            TextView(this).apply {
+                this.text = text
+                textSize = 12f
+                setTextColor(Color.rgb(104, 109, 118))
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(12)
+            }
+        )
+    }
+
+    private fun addSectionTitle(title: String) {
+        panelContentContainer.addView(
+            TextView(this).apply {
+                text = title
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(28, 30, 34))
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(6)
+                bottomMargin = dp(6)
+            }
+        )
+    }
+
+    private fun addBodyText(text: String) {
+        panelContentContainer.addView(
+            TextView(this).apply {
+                this.text = text.trim()
+                textSize = 14f
+                setLineSpacing(dp(2).toFloat(), 1f)
+                setTextColor(Color.rgb(52, 56, 63))
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(10)
+            }
+        )
+    }
+
+    private fun addVisibleTextCard(lines: List<String>) {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                setColor(Color.rgb(245, 246, 250))
+            }
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+        }
+
+        lines.forEachIndexed { index, line ->
+            card.addView(
+                TextView(this).apply {
+                    text = line
+                    textSize = 14f
+                    setLineSpacing(dp(2).toFloat(), 1f)
+                    setTextColor(Color.rgb(50, 54, 61))
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    if (index > 0) {
+                        topMargin = dp(4)
+                    }
+                }
+            )
+        }
+
+        panelContentContainer.addView(
+            card,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(10)
+            }
+        )
+    }
+
+    private fun addKeyElementCard(item: ScreenKeyElement) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(2), 0, dp(2))
+        }
+
+        row.addView(
+            TextView(this).apply {
+                text = "• "
+                textSize = 14f
+                setTextColor(Color.rgb(52, 56, 63))
+            }
+        )
+
+        row.addView(
+            TextView(this).apply {
+                val content = buildString {
+                    append(item.title)
+                    if (item.title.isNotBlank() && item.description.isNotBlank()) {
+                        append(": ")
+                    }
+                    append(item.description)
+                }
+
+                text =
+                    SpannableString(content).apply {
+                        if (item.title.isNotBlank()) {
+                            setSpan(
+                                StyleSpan(Typeface.BOLD),
+                                0,
+                                item.title.length,
+                                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                        }
+                    }
+                textSize = 14f
+                setTextColor(Color.rgb(52, 56, 63))
+            },
+            LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        panelContentContainer.addView(
+            row,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+    }
+
+    private fun addActionsList(actions: List<String>) {
+        actions.forEach { action ->
+            panelContentContainer.addView(
+                TextView(this).apply {
+                    text = "• ${action.trim()}"
+                    textSize = 14f
+                    setTextColor(Color.rgb(52, 56, 63))
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = dp(4)
+                }
+            )
+        }
+    }
+
+    private fun formatVisibleTextLines(lines: List<String>): List<String> {
+        val formattedLines = mutableListOf<String>()
+
+        lines.forEach { rawLine ->
+            val normalizedLine =
+                rawLine
+                    .trim()
+                    .replace(Regex("\\s+"), " ")
+
+            if (normalizedLine.isBlank()) return@forEach
+
+            if (formattedLines.lastOrNull() != normalizedLine) {
+                formattedLines.add(normalizedLine)
+            }
+        }
+
+        return formattedLines
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
